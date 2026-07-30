@@ -31,10 +31,7 @@
 | Backend | PHP 8.2 — API RESTful con PDO |
 | Base de datos | PostgreSQL 17 (Supabase) — 6 tablas relacionales |
 | Correo | PHPMailer con SMTP de Gmail |
-| Servidor | Apache (XAMPP) / Supabase | 8.2 — API RESTful |
-| Base de datos | MySQL 8.0 / MariaDB 10.4 |
-| Correo | PHPMailer con SMTP de Gmail |
-| Servidor | Apache (XAMPP) |
+| Servidor | Apache (XAMPP) / Supabase |
 
 ## Estructura del proyecto
 
@@ -61,6 +58,15 @@ portal-cliente/
 Antes de usar el sistema, edita estos archivos con tus datos reales (están en `.gitignore` y no se suben al repo):
 
 | Archivo | Qué reemplazar |
+|---------|---------------|
+| `api/config.php` | `TU_HOST`, `TU_USUARIO`, `TU_CONTRASEÑA` por tus datos de Supabase |
+| `api/mail_config.php` | `tu-correo@gmail.com` y `tu-contraseña-de-aplicacion` por tus datos SMTP |
+
+## Instalación local
+
+### Requisitos
+
+- [XAMPP](https://www.apachefriends.org/)ar |
 |---------
 
 - [XAMPP](https://www.apachefriends.org/) (Apache + PHP + MySQL)
