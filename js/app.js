@@ -12,10 +12,6 @@ const AppData = {
     tagline: "Desarrollo Web & Tecnología"
   },
   adminCredentials: { email: "admin@developer.com" },
-  clientCredentials: {
-    identifier: "contacto@virgomotosport.com",
-    password: "virmoto2026"
-  },
   clients: []
 };
 
@@ -41,7 +37,6 @@ async function loadAppData() {
       if (data.clients) AppData.clients = data.clients;
       if (data.dev_brand) Object.assign(AppData.devBrand, data.dev_brand);
       if (data.admin_credentials) Object.assign(AppData.adminCredentials, data.admin_credentials);
-      if (data.client_credentials) Object.assign(AppData.clientCredentials, data.client_credentials);
     }
   } catch (_) {}
 }
@@ -284,7 +279,7 @@ const C = {
             Crear cuenta nueva
           </button>
           <p class="login__hint">
-            Demo cliente: <strong>contacto@virgomotosport.com</strong> / <strong>virmoto2026</strong><br>
+            Demo cliente: <strong>contacto@virgomotosport.com</strong><br>
             Demo admin: <strong>admin@developer.com</strong> / (cualquier contraseña)
           </p>
         </form>
@@ -1145,14 +1140,6 @@ async function doApiLogin(identifier, password) {
   return null;
 }
 
-function doLocalLogin(identifier, password) {
-  if (identifier === AppData.adminCredentials.email) return "admin";
-  const { clientCredentials } = AppData;
-  if ((identifier === clientCredentials.identifier || identifier === clientCredentials.identifier.split("@")[0])
-    && password === clientCredentials.password) return "client";
-  return null;
-}
-
 function handleLogin(e) {
   e.preventDefault();
   const identifier = $("#login-identifier")?.value.trim();
@@ -1166,9 +1153,8 @@ function handleLogin(e) {
   const submitBtn = $("#login-form")?.querySelector("button[type=submit]");
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Validando..."; }
 
-  // Try API first, fallback to local
+  // Try API
   doApiLogin(identifier, password).then(role => {
-    if (!role) role = doLocalLogin(identifier, password);
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Iniciar Sesión"; }
 
     if (role === "admin") {
@@ -1282,10 +1268,6 @@ function handleRegister(e) {
     state.view = "verify";
     location.hash = "verify";
     renderApp();
-    // Si no se pudo enviar el correo, mostrar código en consola
-    if (!data.mail_sent && data.dev_code) {
-      console.log("Código de verificación (desarrollo):", data.dev_code);
-    }
   })
   .catch(err => {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Crear cuenta"; }
@@ -1350,9 +1332,6 @@ function resendCode() {
       showToast("Error", data.error, "error");
     } else {
       showToast("Enviado", "Nuevo código enviado a tu correo.", "mail");
-      if (!data.mail_sent && data.dev_code) {
-        console.log("Nuevo código (desarrollo):", data.dev_code);
-      }
     }
   })
   .catch(() => {

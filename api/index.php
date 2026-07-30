@@ -135,7 +135,7 @@ function handleGetAll() {
     $devBrand = ['name' => 'Alejandro Lopez', 'tagline' => 'Desarrollo Web & Tecnología'];
 
     // Client demo credentials
-    $clientCreds = ['identifier' => 'contacto@virgomotosport.com', 'password' => 'virmoto2026'];
+    $clientCreds = ['identifier' => DEMO_CLIENT_EMAIL, 'password' => DEMO_CLIENT_PASS];
 
     // All clients with nested data
     $clients = [];
@@ -259,7 +259,7 @@ function handleLogin() {
     if ($r->fetch()) jsonResponse(['role' => 'admin', 'message' => 'Login admin exitoso']);
 
     // Demo
-    if ($email === 'contacto@virgomotosport.com' && $input['password'] === 'virmoto2026') {
+    if ($email === DEMO_CLIENT_EMAIL && $input['password'] === DEMO_CLIENT_PASS) {
         jsonResponse(['role' => 'client', 'message' => 'Login cliente exitoso']);
     }
 

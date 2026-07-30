@@ -56,9 +56,12 @@ portal-cliente/
     └── init.sql            # Esquema de base de datos
 ```
 
-## Instalación local
+## Configuración obligatoria
 
-### Requisitos
+Antes de usar el sistema, edita estos archivos con tus datos reales (están en `.gitignore` y no se suben al repo):
+
+| Archivo | Qué reemplazar |
+|---------
 
 - [XAMPP](https://www.apachefriends.org/) (Apache + PHP + MySQL)
 - [Composer](https://getcomposer.org/) (para PHPMailer)
@@ -70,7 +73,7 @@ portal-cliente/
    git clone https://github.com/lopez-torres-alejandro/portal-cliente.git
    ```
 
-2. Copiar a `C:\xampp\htdocs\portal-cliente\` (o la ruta de tu servidor web)
+2. Copiar a la raíz del servidor web (ej: `htdocs/portal-cliente/`)
 
 3. Instalar dependencias de PHP:
    ```bash
@@ -118,7 +121,7 @@ portal-cliente/
 | Rol | Correo | Contraseña |
 |-----|--------|------------|
 | Admin | `admin@developer.com` | Cualquiera |
-| Cliente demo | `contacto@virgomotosport.com` | `virmoto2026` |
+| Cliente demo | `contacto@virgomotosport.com` | (configurar en `config.php`) |
 
 ## Seguridad
 
