@@ -3,3 +3,6 @@
 /api/config.php
 /api/mail_config.php
 /api/vendor/
+.env
+.env.*
+!.env.example

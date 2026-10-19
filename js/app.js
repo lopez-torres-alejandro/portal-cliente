@@ -11,19 +11,31 @@ const AppData = {
     name: "Alejandro Lopez",
     tagline: "Desarrollo Web & Tecnología"
   },
-  adminCredentials: { email: "admin@developer.com" },
   clients: []
 };
 
 /* ============================================================
  * 1.5. PERSISTENCIA (localStorage + API)
  * ============================================================ */
+let persistQueue = Promise.resolve();
 function persistData() {
-  fetch("api/index.php?action=save-clients", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clients: AppData.clients })
-  }).catch(() => {});
+  if (!state.isAdmin) return Promise.resolve(false);
+  const body = JSON.stringify({ clients: AppData.clients });
+  persistQueue = persistQueue.catch(() => false).then(async () => {
+    try {
+      const response = await fetch("api/index.php?action=save-clients", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body
+      });
+      if (!response.ok) throw new Error("save failed");
+      return true;
+    } catch (_) {
+      showToast("No se guardaron los cambios", "Revisa tu conexión y vuelve a guardar.", "error");
+      return false;
+    }
+  });
+  return persistQueue;
 }
 
 /* ============================================================
@@ -32,13 +44,39 @@ function persistData() {
 async function loadAppData() {
   try {
     const res = await fetch("api/index.php?action=get-all");
-    if (res.ok) {
-      const data = await res.json();
-      if (data.clients) AppData.clients = data.clients;
-      if (data.dev_brand) Object.assign(AppData.devBrand, data.dev_brand);
-      if (data.admin_credentials) Object.assign(AppData.adminCredentials, data.admin_credentials);
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (data.clients) AppData.clients = data.clients;
+    if (data.dev_brand) Object.assign(AppData.devBrand, data.dev_brand);
+    return true;
+  } catch (_) { return false; }
+}
+
+async function restoreSession() {
+  try {
+    const response = await fetch("api/index.php?action=session");
+    if (!response.ok) return false;
+    const session = await response.json();
+    const isAdmin = session.role === "admin";
+    if (!isAdmin && session.role !== "client") return false;
+    if (!await loadAppData()) throw new Error("No se pudieron cargar los datos de la sesión");
+    state.loggedIn = true;
+    state.isAdmin = isAdmin;
+    state.adminAccess = isAdmin;
+    if (isAdmin) {
+      state.activeClientId = AppData.clients[0]?.id ?? null;
+    } else {
+      state.activeClientId = Number(session.client_id);
+      if (!getActiveClient()) throw new Error("La cuenta no tiene un cliente asociado");
     }
-  } catch (_) {}
+    return true;
+  } catch (_) {
+    await fetch("api/index.php?action=logout", { method: "POST" }).catch(() => {});
+    state.loggedIn = false;
+    state.isAdmin = false;
+    state.adminAccess = false;
+    return false;
+  }
 }
 
 /* ============================================================
@@ -46,10 +84,11 @@ async function loadAppData() {
  * ============================================================ */
 const state = {
   theme: localStorage.getItem("nc-theme") || "dark",
-  loggedIn: sessionStorage.getItem("nc-logged") === "true",
-  isAdmin: sessionStorage.getItem("nc-admin") === "true",
+  loggedIn: false,
+  isAdmin: false,
+  adminAccess: false,
   view: "home",
-  activeClientId: parseInt(sessionStorage.getItem("nc-client")) || 1,
+  activeClientId: null,
   editClientId: null,
   editProjectId: null,
   editPanelOpen: false,
@@ -62,11 +101,33 @@ const state = {
  * ============================================================ */
 const $ = (sel, ctx) => (ctx || document).querySelector(sel);
 const $$ = (sel, ctx) => [...(ctx || document).querySelectorAll(sel)];
+const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+}[char]));
+const safeStatus = value => ["active", "in-progress", "about-to-expire", "pending", "completed", "suspended"].includes(value) ? value : "pending";
+
+function safeExternalUrl(value) {
+  const url = String(value || "").trim();
+  try {
+    const parsed = new URL(url, location.href);
+    return ["http:", "https:"].includes(parsed.protocol) ? url : "#";
+  } catch (_) { return "#"; }
+}
 
 function copyToClipboard(text) {
+  if (!navigator.clipboard?.writeText) {
+    showToast("Portapapeles no disponible", "Copia el código de color manualmente.", "info");
+    return;
+  }
   navigator.clipboard.writeText(text)
-    .then(() => showToast("Copiado", `Color ${text} copiado al portapapeles`));
+    .then(() => showToast("Copiado", `Color ${text} copiado al portapapeles`))
+    .catch(() => showToast("No se pudo copiar", "Copia el código de color manualmente.", "error"));
 }
+
+document.addEventListener("click", event => {
+  const swatch = event.target.closest?.(".palette-swatch");
+  if (swatch) copyToClipboard(swatch.dataset.color);
+});
 
 function showToast(title, message, icon = "check_circle") {
   const toast = $("#toast");
@@ -127,11 +188,12 @@ const C = {
       active: "Activo", "in-progress": "En Proceso", "about-to-expire": "Por Vencer",
       pending: "Pendiente", completed: "Completado", suspended: "Suspendido"
     };
-    return `<span class="badge badge--${status}">${labels[status] || status}</span>`;
+    const normalized = safeStatus(status);
+    return `<span class="badge badge--${normalized}">${labels[normalized]}</span>`;
   },
 
   card(title, content, cls = "") {
-    return `<div class="card ${cls}"><h3 class="card__title">${title}</h3><div class="card__body">${content}</div></div>`;
+    return `<div class="card ${cls}"><h3 class="card__title">${escapeHtml(title)}</h3><div class="card__body">${content}</div></div>`;
   },
 
   circularProgress(percent, size = 120) {
@@ -149,37 +211,42 @@ const C = {
   milestoneList(ms) {
     const icons = { completed: "check_circle", "in-progress": "pending", pending: "radio_button_unchecked" };
     const labels = { completed: "Completado", "in-progress": "En Proceso", pending: "Pendiente" };
-    return `<ul class="milestone-list">${ms.map(m => `
-      <li class="milestone milestone--${m.status}">
-        <span class="milestone__icon material-icons">${icons[m.status]}</span>
-        <span class="milestone__title">${m.title}</span>
-        <span class="milestone__tag">${labels[m.status]}</span>
-      </li>`).join("")}</ul>`;
+    return `<ul class="milestone-list">${ms.map(m => {
+      const status = ["completed", "in-progress", "pending"].includes(m.status) ? m.status : "pending";
+      return `
+      <li class="milestone milestone--${status}">
+        <span class="milestone__icon material-icons">${icons[status]}</span>
+        <span class="milestone__title">${escapeHtml(m.title)}</span>
+        <span class="milestone__tag">${labels[status]}</span>
+      </li>`;
+    }).join("")}</ul>`;
   },
 
   serviceTable(svcs) {
     return `<div class="table-responsive"><table class="service-table">
       <thead><tr><th>Servicio</th><th>Estado</th><th>Vencimiento</th><th>Precio</th></tr></thead>
       <tbody>${svcs.map(s => `<tr>
-        <td class="service-table__name">${s.name}</td>
+        <td class="service-table__name">${escapeHtml(s.name)}</td>
         <td>${C.statusBadge(s.status)}</td>
-        <td>${s.dueDate}</td>
-        <td>${s.price}</td>
+        <td>${escapeHtml(s.dueDate)}</td>
+        <td>${escapeHtml(s.price)}</td>
       </tr>`).join("")}</tbody></table></div>`;
   },
 
   colorPalette(pal) {
-    return `<div class="palette-grid">${pal.map(c => `
-      <button class="palette-swatch" style="background:${c.hex}" data-color="${c.hex}"
-        onclick="copyToClipboard('${c.hex}')" title="Copiar ${c.hex}">
-        <span class="palette-swatch__code">${c.hex}</span>
-        <span class="palette-swatch__name">${c.name}</span>
-      </button>`).join("")}</div>`;
+    return `<div class="palette-grid">${pal.map(c => {
+      const hex = /^#[\da-f]{6}$/i.test(c.hex || "") ? c.hex : "#000000";
+      return `
+      <button class="palette-swatch" style="background:${hex}" data-color="${hex}" title="Copiar ${hex}">
+        <span class="palette-swatch__code">${hex}</span>
+        <span class="palette-swatch__name">${escapeHtml(c.name)}</span>
+      </button>`;
+    }).join("")}</div>`;
   },
 
   downloadBtn(label, url, icon = "download") {
-    return `<a href="${url}" class="btn btn--outline" target="_blank" rel="noopener">
-      <span class="material-icons">${icon}</span> ${label}</a>`;
+    return `<a href="${escapeHtml(safeExternalUrl(url))}" class="btn btn--outline" target="_blank" rel="noopener noreferrer">
+      <span class="material-icons">${icon}</span> ${escapeHtml(label)}</a>`;
   },
 
   /* --- Sidebar (dinámica: admin vs cliente) --- */
@@ -260,6 +327,7 @@ const C = {
   loginView() {
     return `<div class="login" id="login-view">
       <div class="login__card">
+        <div class="login__visual" aria-hidden="true"><span class="login__orbit login__orbit--one"></span><span class="login__orbit login__orbit--two"></span><span class="login__monogram">A<span>.</span></span><span class="login__visual-caption">ESTUDIO DIGITAL<br>CLIENTES & PROYECTOS</span></div>
         <div class="login__brand">
           <div class="login__logo">A</div>
           <h1 class="login__title">Alejandro Lopez</h1>
@@ -268,19 +336,18 @@ const C = {
         <form class="login__form" id="login-form" autocomplete="off">
           <div class="form-group">
             <label class="form-label">Correo o RUC</label>
-            <input class="form-input" type="text" id="login-identifier" placeholder="correo@ejemplo.com" required autofocus>
+            <input class="form-input" type="text" id="login-identifier" placeholder="correo@ejemplo.com" autocomplete="username" required autofocus>
           </div>
           <div class="form-group">
             <label class="form-label">Contraseña</label>
-            <input class="form-input" type="password" id="login-password" placeholder="••••••••" required>
+            <input class="form-input" type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required>
           </div>
           <button class="btn btn--primary btn--full" type="submit">Iniciar Sesión</button>
           <button class="btn btn--outline btn--full" type="button" onclick="showRegister()" style="margin-top:.5rem">
             Crear cuenta nueva
           </button>
           <p class="login__hint">
-            Demo cliente: <strong>contacto@virgomotosport.com</strong><br>
-            Demo admin: <strong>admin@developer.com</strong> / (cualquier contraseña)
+            Acceso privado para clientes registrados.<br>¿Aún no tienes cuenta? Puedes crearla aquí.
           </p>
         </form>
       </div>
@@ -312,11 +379,11 @@ const C = {
           </div>
           <div class="form-group">
             <label class="form-label">Contraseña *</label>
-            <input class="form-input" type="password" id="reg-password" placeholder="Mín. 8 caracteres, 1 mayúscula, 1 número" required minlength="8">
+            <input class="form-input" type="password" id="reg-password" placeholder="Mín. 8 caracteres, 1 mayúscula, 1 número" required minlength="8" maxlength="72" autocomplete="new-password">
           </div>
           <div class="form-group">
             <label class="form-label">Confirmar contraseña *</label>
-            <input class="form-input" type="password" id="reg-confirm" placeholder="Repite la contraseña" required>
+            <input class="form-input" type="password" id="reg-confirm" placeholder="Repite la contraseña" required maxlength="72" autocomplete="new-password">
           </div>
           <button class="btn btn--primary btn--full" type="submit">Crear cuenta</button>
         </form>
@@ -329,7 +396,7 @@ const C = {
     return `<div class="register" id="register-view">
       <div class="register__card">
         <h2 class="register__title">Verifica tu correo</h2>
-        <p class="register__subtitle">Te enviamos un código de 6 dígitos a <strong>${email}</strong></p>
+        <p class="register__subtitle">Te enviamos un código de 6 dígitos a <strong>${escapeHtml(email)}</strong></p>
         <div class="register__error" id="register-error"></div>
         <form class="register__form" id="verify-form" autocomplete="off">
           <div class="form-group">
@@ -349,11 +416,11 @@ const C = {
   homeView() {
     const cl = getActiveClient();
     if (!cl) return "<p>Cliente no encontrado</p>";
-    const projects = cl.projects.filter(p => p.progress > 0);
+    const projects = cl.projects;
 
     return `<div class="view home-view">
       <header class="view__header">
-        <h2 class="view__title">¡Hola, ${cl.company}!</h2>
+        <h2 class="view__title">¡Hola, ${escapeHtml(cl.company)}!</h2>
         <p class="view__subtitle">Progreso de tus proyectos</p>
         <button class="btn btn--icon sidebar-toggle" aria-label="Menú"><span class="material-icons">menu</span></button>
       </header>
@@ -370,19 +437,22 @@ const C = {
   projectCard(p) {
     const icons = { completed: "check_circle", "in-progress": "pending", pending: "radio_button_unchecked" };
     const labels = { completed: "Completado", "in-progress": "En Proceso", pending: "Pendiente" };
-    const msList = p.milestones.map(m => `
-      <li class="milestone milestone--${m.status}">
-        <span class="milestone__icon material-icons">${icons[m.status]}</span>
-        <span class="milestone__title">${m.title}</span>
-        <span class="milestone__tag">${labels[m.status]}</span>
-      </li>`).join("");
+    const msList = p.milestones.map(m => {
+      const status = ["completed", "in-progress", "pending"].includes(m.status) ? m.status : "pending";
+      return `
+      <li class="milestone milestone--${status}">
+        <span class="milestone__icon material-icons">${icons[status]}</span>
+        <span class="milestone__title">${escapeHtml(m.title)}</span>
+        <span class="milestone__tag">${labels[status]}</span>
+      </li>`;
+    }).join("");
 
     return `<div class="project-card">
       <div class="project-card__main">
         <div class="project-card__progress">${C.circularProgress(p.progress, 80)}</div>
         <div class="project-card__info">
-          <h4 class="project-card__name">${p.name}</h4>
-          <p class="project-card__phase"><span class="material-icons">flag</span> ${p.phase}</p>
+          <h4 class="project-card__name">${escapeHtml(p.name)}</h4>
+          <p class="project-card__phase"><span class="material-icons">flag</span> ${escapeHtml(p.phase)}</p>
           <div class="progress-bar"><div class="progress-bar__fill" style="width:${p.progress}%"></div></div>
           <span class="progress-bar__label">${p.progress}% completado</span>
         </div>
@@ -417,7 +487,7 @@ const C = {
       ${cl.projects.filter(p => p.services.length > 0).map(p => `
         <div class="project-services-group">
           <h4 class="project-services-group__title">
-            <span class="material-icons">folder</span> ${p.name}
+            <span class="material-icons">folder</span> ${escapeHtml(p.name)}
           </h4>
           ${C.serviceTable(p.services)}
         </div>`).join("")}
@@ -431,13 +501,13 @@ const C = {
     return `<div class="view brand-view">
       <header class="view__header">
         <h2 class="view__title">Identidad de Marca</h2>
-        <p class="view__subtitle">Recursos visuales por proyecto — ${cl.company}</p>
+        <p class="view__subtitle">Recursos visuales por proyecto — ${escapeHtml(cl.company)}</p>
         <button class="btn btn--icon sidebar-toggle" aria-label="Menú"><span class="material-icons">menu</span></button>
       </header>
       ${cl.projects.filter(p => p.brand).map(p => `
         <div class="brand-project-group">
           <h3 class="brand-project-group__title">
-            <span class="material-icons">folder</span> ${p.name}
+            <span class="material-icons">folder</span> ${escapeHtml(p.name)}
           </h3>
           ${C.card("Paleta de Colores", C.colorPalette(p.brand.palette))}
           <div class="brand-grid" style="margin-top:1rem">
@@ -489,13 +559,13 @@ const C = {
           <div class="support__info">
             <div class="support__info-row"><span class="material-icons">schedule</span><span>Lun - Vie: 9:00 AM - 6:00 PM</span></div>
             <div class="support__info-row"><span class="material-icons">speed</span><span>Respuesta: Máximo 2 horas hábiles</span></div>
-            <div class="support__info-row"><span class="material-icons">business</span><span>${dev.name}</span></div>
+            <div class="support__info-row"><span class="material-icons">business</span><span>${escapeHtml(dev.name)}</span></div>
           </div>`)}
         ${cl ? C.card("Tus Proyectos", `
           <div class="support__project">
-            <p><strong>${cl.company}</strong></p>
-            ${cl.projects.map(p => `<p>• ${p.name} <span class="support__phase">(${p.phase})</span></p>`).join("")}
-            <p>Contacto: ${cl.email}</p>
+            <p><strong>${escapeHtml(cl.company)}</strong></p>
+            ${cl.projects.map(p => `<p>• ${escapeHtml(p.name)} <span class="support__phase">(${escapeHtml(p.phase)})</span></p>`).join("")}
+            <p>Contacto: ${escapeHtml(cl.email)}</p>
           </div>`) : ""}
       </div>
     </div>`;
@@ -563,9 +633,9 @@ const C = {
       ${soon.length > 0 ? C.card("Vencimientos Próximos (30 días)", `
         <div class="admin-renewals">${soon.map(r => `
           <div class="admin-renewal">
-            <span class="admin-renewal__client">${r.client}</span>
-            <span class="admin-renewal__service">${r.project} — ${r.service}</span>
-            <span class="admin-renewal__date">${r.date}</span>
+            <span class="admin-renewal__client">${escapeHtml(r.client)}</span>
+            <span class="admin-renewal__service">${escapeHtml(r.project)} — ${escapeHtml(r.service)}</span>
+            <span class="admin-renewal__date">${escapeHtml(r.date)}</span>
           </div>`).join("")}</div>`) : ""}
       <div style="margin-top:1.5rem;text-align:center;color:var(--text-muted);font-size:.8125rem">
         <span class="material-icons" style="vertical-align:middle;font-size:1rem">info</span>
@@ -592,8 +662,8 @@ const C = {
             const activeSvcs = allSvcs.filter(s => s.status === "active" || s.status === "in-progress").length;
             const firstProj = c.projects[0];
             return `<tr>
-              <td><strong>${c.company}</strong><br><span class="admin-table__sub">${c.email}</span></td>
-              <td>${firstProj?.name || "—"}${c.projects.length > 1 ? ` <span class="badge badge--active">+${c.projects.length - 1}</span>` : ""}</td>
+              <td><strong>${escapeHtml(c.company)}</strong><br><span class="admin-table__sub">${escapeHtml(c.email)}</span></td>
+              <td>${escapeHtml(firstProj?.name || "—")}${c.projects.length > 1 ? ` <span class="badge badge--active">+${c.projects.length - 1}</span>` : ""}</td>
               <td>
                 <div class="admin-progress-mini">
                   <div class="progress-bar" style="width:80px">
@@ -630,7 +700,7 @@ const C = {
 
     return `<div class="edit-panel" id="edit-panel">
       <div class="edit-panel__header">
-        <h3>Editando: ${cl.company}</h3>
+        <h3>Editando: ${escapeHtml(cl.company)}</h3>
         <button class="btn btn--ghost" onclick="closeEditPanel()"><span class="material-icons">close</span></button>
       </div>
       <div class="edit-panel__body">
@@ -641,7 +711,7 @@ const C = {
           <div class="form-group">
             <label class="form-label">Seleccionar Proyecto</label>
             <select class="form-input" id="edit-project-select" onchange="switchEditProject(${clientId}, parseInt(this.value))">
-              ${projects.map(p => `<option value="${p.id}" ${p.id === projId ? "selected" : ""}>${p.name}</option>`).join("")}
+              ${projects.map(p => `<option value="${p.id}" ${p.id === projId ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
             </select>
           </div>` : `<input type="hidden" id="edit-project-select" value="${proj.id}">`}
           <button class="btn btn--outline" onclick="addProject(${clientId})" style="margin-top:.5rem;width:100%">
@@ -650,7 +720,7 @@ const C = {
 
           <div class="form-group" style="margin-top:.75rem">
             <label class="form-label">Nombre del Proyecto</label>
-            <input class="form-input" type="text" id="edit-project-name" value="${proj.name}">
+            <input class="form-input" type="text" id="edit-project-name" value="${escapeHtml(proj.name)}">
           </div>
           <div class="edit-slider-group">
             <label>Avance: <strong id="edit-progress-val">${proj.progress}%</strong></label>
@@ -659,7 +729,7 @@ const C = {
           </div>
           <div class="form-group">
             <label class="form-label">Fase Actual</label>
-            <input class="form-input" type="text" id="edit-phase" value="${proj.phase}">
+            <input class="form-input" type="text" id="edit-phase" value="${escapeHtml(proj.phase)}">
           </div>
         </section>
 
@@ -670,8 +740,7 @@ const C = {
             <div class="edit-milestone-row" data-ms-idx="${i}">
               <input type="checkbox" class="edit-checkbox" ${m.status === "completed" ? "checked" : ""}
                 onchange="updateMilestoneStatus(${clientId}, ${proj.id}, ${m.id}, this)">
-              <input class="form-input edit-milestone-name" value="${m.title}" placeholder="Nombre del hito"
-                oninput="updateMilestoneName(${clientId}, ${proj.id}, ${m.id}, this.value)">
+              <input class="form-input edit-milestone-name" value="${escapeHtml(m.title)}" placeholder="Nombre del hito">
               <button class="btn btn--ghost" onclick="removeMilestone(${clientId}, ${proj.id}, ${m.id})" title="Eliminar" style="color:var(--danger);padding:.25rem">
                 <span class="material-icons">delete</span>
               </button>
@@ -686,7 +755,7 @@ const C = {
           <h4 class="edit-section__title">Servicios de este Proyecto</h4>
           <div id="edit-services-list">${proj.services.map((s, i) => `
             <div class="edit-service-row" data-svc-idx="${i}">
-              <input class="form-input edit-service-name" value="${s.name}" placeholder="Nombre">
+              <input class="form-input edit-service-name" value="${escapeHtml(s.name)}" placeholder="Nombre">
               <select class="form-input edit-service-status" onchange="updateServiceStatus(${clientId}, ${proj.id}, ${i}, this.value)">
                 <option value="active" ${s.status === "active" ? "selected" : ""}>Activo</option>
                 <option value="in-progress" ${s.status === "in-progress" ? "selected" : ""}>En Proceso</option>
@@ -694,8 +763,8 @@ const C = {
                 <option value="pending" ${s.status === "pending" ? "selected" : ""}>Pendiente</option>
                 <option value="completed" ${s.status === "completed" ? "selected" : ""}>Completado</option>
               </select>
-              <input class="form-input edit-service-date" type="date" value="${s.dueDate}">
-              <input class="form-input edit-service-price" value="${s.price}" placeholder="$0" style="width:80px">
+              <input class="form-input edit-service-date" type="date" value="${escapeHtml(s.dueDate)}">
+              <input class="form-input edit-service-price" value="${escapeHtml(s.price)}" placeholder="$0" style="width:80px">
               <button class="btn btn--ghost" onclick="removeService(${clientId}, ${proj.id}, ${i})" title="Eliminar" style="color:var(--danger)">
                 <span class="material-icons">delete</span>
               </button>
@@ -710,10 +779,10 @@ const C = {
           <h4 class="edit-section__title">Identidad de Marca</h4>
           <div class="edit-colors" id="edit-colors-list">${proj.brand?.palette ? proj.brand.palette.map((c, i) => `
             <div class="edit-color-row">
-              <input class="form-input edit-color-name" value="${c.name}" placeholder="Nombre" style="flex:1">
-              <input class="form-input edit-color-hex" type="color" value="${c.hex}" style="width:50px;padding:2px;height:38px"
+              <input class="form-input edit-color-name" value="${escapeHtml(c.name)}" placeholder="Nombre" style="flex:1">
+              <input class="form-input edit-color-hex" type="color" value="${escapeHtml(c.hex)}" style="width:50px;padding:2px;height:38px"
                 oninput="this.parentNode.querySelector('.edit-color-hex-text').value=this.value">
-              <input class="form-input edit-color-hex-text" value="${c.hex}" placeholder="#HEX" style="width:90px;font-family:monospace"
+              <input class="form-input edit-color-hex-text" value="${escapeHtml(c.hex)}" placeholder="#HEX" style="width:90px;font-family:monospace"
                 oninput="this.parentNode.querySelector('.edit-color-hex').value=this.value">
               <button class="btn btn--ghost" onclick="removeColor(${clientId}, ${proj.id}, ${i})" title="Eliminar" style="color:var(--danger)">
                 <span class="material-icons">delete</span>
@@ -724,15 +793,15 @@ const C = {
           </button>
           <div class="form-group" style="margin-top:.75rem">
             <label class="form-label">URL Logotipo</label>
-            <input class="form-input" type="text" id="edit-logo-url" value="${proj.brand?.logoUrl || "#"}" placeholder="#">
+            <input class="form-input" type="text" id="edit-logo-url" value="${escapeHtml(proj.brand?.logoUrl || "#")}" placeholder="#">
           </div>
           <div class="form-group">
             <label class="form-label">URL Manual de Marca</label>
-            <input class="form-input" type="text" id="edit-manual-url" value="${proj.brand?.brandManualUrl || "#"}" placeholder="#">
+            <input class="form-input" type="text" id="edit-manual-url" value="${escapeHtml(proj.brand?.brandManualUrl || "#")}" placeholder="#">
           </div>
           <div class="form-group">
             <label class="form-label">URL Repositorio</label>
-            <input class="form-input" type="text" id="edit-repo-url" value="${proj.brand?.repoUrl || "#"}" placeholder="#">
+            <input class="form-input" type="text" id="edit-repo-url" value="${escapeHtml(proj.brand?.repoUrl || "#")}" placeholder="#">
           </div>
         </section>
       </div>
@@ -834,24 +903,26 @@ window.removeService = function(clientId, projectId, idx) {
 window.addProject = function(clientId) {
   const cl = getClient(clientId);
   if (!cl) return;
-  const maxId = Math.max(...cl.projects.map(p => p.id), 0);
-  const newId = maxId + 1;
+  const allProjects = AppData.clients.flatMap(client => client.projects || []);
+  const newId = Math.max(0, ...allProjects.map(p => Number(p.id) || 0)) + 1;
+  const allMilestones = allProjects.flatMap(project => project.milestones || []);
+  const firstMilestoneId = Math.max(0, ...allMilestones.map(m => Number(m.id) || 0)) + 1;
   cl.projects.push({
     id: newId,
     name: "Nuevo Proyecto",
     progress: 0,
     phase: "Por definir",
     milestones: [
-      { id: 1, title: "Diagnóstico inicial", status: "pending" },
-      { id: 2, title: "Prototipo e interfaz (UI)", status: "pending" },
-      { id: 3, title: "Programación y funcionalidades", status: "pending" },
-      { id: 4, title: "Pruebas y optimización", status: "pending" },
-      { id: 5, title: "Lanzamiento y hosting", status: "pending" }
+      { id: firstMilestoneId, title: "Diagnóstico inicial", status: "pending" },
+      { id: firstMilestoneId + 1, title: "Prototipo e interfaz (UI)", status: "pending" },
+      { id: firstMilestoneId + 2, title: "Programación y funcionalidades", status: "pending" },
+      { id: firstMilestoneId + 3, title: "Pruebas y optimización", status: "pending" },
+      { id: firstMilestoneId + 4, title: "Lanzamiento y hosting", status: "pending" }
     ],
     services: [],
     brand: {
       palette: [
-        { name: "Color Principal", hex: "#10b981" },
+        { name: "Color Principal", hex: "#E8A45B" },
         { name: "Gris", hex: "#94a3b8" },
         { name: "Blanco", hex: "#FFFFFF" }
       ],
@@ -870,8 +941,9 @@ window.addService = function(clientId, projectId) {
   if (!cl) return;
   const proj = cl.projects.find(p => p.id === projectId);
   if (!proj) return;
-  const maxId = Math.max(...proj.services.map(s => s.id), 0);
-  proj.services.push({ id: maxId + 1, name: "Nuevo Servicio", status: "pending", dueDate: "2026-12-31", price: "$0" });
+  const allServices = AppData.clients.flatMap(client => client.projects || []).flatMap(project => project.services || []);
+  const nextId = Math.max(0, ...allServices.map(s => Number(s.id) || 0)) + 1;
+  proj.services.push({ id: nextId, name: "Nuevo Servicio", status: "pending", dueDate: "2026-12-31", price: "$0" });
   persistData();
   renderEditPanel(clientId);
 };
@@ -881,8 +953,9 @@ window.addMilestone = function(clientId, projectId) {
   if (!cl) return;
   const proj = cl.projects.find(p => p.id === projectId);
   if (!proj) return;
-  const maxId = Math.max(...proj.milestones.map(m => m.id), 0);
-  proj.milestones.push({ id: maxId + 1, title: "Nuevo hito", status: "pending" });
+  const allMilestones = AppData.clients.flatMap(client => client.projects || []).flatMap(project => project.milestones || []);
+  const nextId = Math.max(0, ...allMilestones.map(m => Number(m.id) || 0)) + 1;
+  proj.milestones.push({ id: nextId, title: "Nuevo hito", status: "pending" });
   persistData();
   renderEditPanel(clientId);
 };
@@ -895,16 +968,6 @@ window.removeMilestone = function(clientId, projectId, msId) {
   proj.milestones = proj.milestones.filter(m => m.id !== msId);
   persistData();
   renderEditPanel(clientId);
-};
-
-window.updateMilestoneName = function(clientId, projectId, msId, value) {
-  const cl = getClient(clientId);
-  if (!cl) return;
-  const proj = cl.projects.find(p => p.id === projectId);
-  if (!proj) return;
-  const ms = proj.milestones.find(m => m.id === msId);
-  if (ms) ms.title = value;
-  persistData();
 };
 
 window.removeColor = function(clientId, projectId, idx) {
@@ -923,7 +986,7 @@ window.addColor = function(clientId, projectId) {
   const proj = cl.projects.find(p => p.id === projectId);
   if (!proj) return;
   if (!proj.brand) proj.brand = { palette: [], logoUrl: "#", brandManualUrl: "#", repoUrl: "#" };
-  proj.brand.palette.push({ name: "Nuevo Color", hex: "#10b981" });
+  proj.brand.palette.push({ name: "Nuevo Color", hex: "#E8A45B" });
   persistData();
   renderEditPanel(clientId);
 };
@@ -942,7 +1005,7 @@ function renderEditPanel(clientId) {
   });
 }
 
-window.saveEditPanel = function(clientId) {
+window.saveEditPanel = async function(clientId) {
   const cl = getClient(clientId);
   if (!cl) return;
 
@@ -1006,8 +1069,8 @@ window.saveEditPanel = function(clientId) {
     if (repoUrl) proj.brand.repoUrl = repoUrl.value;
   }
 
+  if (!await persistData()) return;
   showToast("Guardado", `Datos de ${cl.company} actualizados correctamente`);
-  persistData();
   closeEditPanel();
 };
 
@@ -1015,11 +1078,11 @@ window.saveEditPanel = function(clientId) {
  * 7. MODO ADMIN/CLIENTE
  * ============================================================ */
 window.toggleMode = function() {
+  if (!state.adminAccess) return;
   state.editPanelOpen = false;
   state.editClientId = null;
   state.editProjectId = null;
   state.isAdmin = !state.isAdmin;
-  sessionStorage.setItem("nc-admin", state.isAdmin);
   const target = state.isAdmin ? "admin" : "home";
   location.hash = target;
   state.view = target;
@@ -1027,13 +1090,12 @@ window.toggleMode = function() {
 };
 
 window.viewAsClient = function(clientId) {
+  if (!state.adminAccess) return;
   state.editPanelOpen = false;
   state.editClientId = null;
   state.editProjectId = null;
   state.activeClientId = clientId;
-  sessionStorage.setItem("nc-client", clientId);
   state.isAdmin = false;
-  sessionStorage.setItem("nc-admin", "false");
   location.hash = "home";
   state.view = "home";
   renderApp();
@@ -1132,18 +1194,19 @@ async function doApiLogin(identifier, password) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: identifier, password })
     });
+    if (res.status >= 500) return "server-error";
     if (res.ok) {
       const data = await res.json();
       return data.role === "admin" ? "admin" : "client";
     }
-  } catch (_) {}
+  } catch (_) { return "connection-error"; }
   return null;
 }
 
 function handleLogin(e) {
   e.preventDefault();
   const identifier = $("#login-identifier")?.value.trim();
-  const password = $("#login-password")?.value.trim();
+  const password = $("#login-password")?.value;
 
   if (!identifier || !password) {
     showToast("Error", "Ingresa tus credenciales", "error");
@@ -1154,44 +1217,63 @@ function handleLogin(e) {
   if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Validando..."; }
 
   // Try API
-  doApiLogin(identifier, password).then(role => {
+  doApiLogin(identifier, password).then(async role => {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Iniciar Sesión"; }
 
     if (role === "admin") {
+      const loaded = await loadAppData();
+      if (!loaded) {
+        await fetch("api/index.php?action=logout", { method: "POST" }).catch(() => {});
+        showToast("No se pudieron cargar los datos", "Revisa la conexión con el servidor.", "error");
+        return;
+      }
       state.loggedIn = true;
       state.isAdmin = true;
-      sessionStorage.setItem("nc-logged", "true");
-      sessionStorage.setItem("nc-admin", "true");
+      state.adminAccess = true;
+      state.activeClientId = AppData.clients[0]?.id ?? null;
       location.hash = "admin";
       handleRoute();
       return;
     }
 
     if (role === "client") {
+      const loaded = await loadAppData();
+      if (!loaded) {
+        await fetch("api/index.php?action=logout", { method: "POST" }).catch(() => {});
+        showToast("No se pudieron cargar tus datos", "Revisa la conexión con el servidor.", "error");
+        return;
+      }
+      const matched = AppData.clients.find(c => c.email?.toLowerCase() === identifier.toLowerCase() || c.ruc === identifier);
+      if (!matched) {
+        await fetch("api/index.php?action=logout", { method: "POST" }).catch(() => {});
+        showToast("Cuenta sin datos", "Contacta al administrador para vincular tus proyectos.", "error");
+        return;
+      }
       state.loggedIn = true;
       state.isAdmin = false;
-      sessionStorage.setItem("nc-logged", "true");
-      sessionStorage.setItem("nc-admin", "false");
-      sessionStorage.setItem("nc-client", "1");
-      state.activeClientId = 1;
+      state.adminAccess = false;
+      state.activeClientId = matched.id;
       location.hash = "home";
       handleRoute();
       return;
     }
 
-    showToast("Credenciales inválidas", "Revisa el correo/RUC y contraseña", "error");
+    if (role === "server-error" || role === "connection-error") {
+      showToast("No se pudo iniciar sesión", "Revisa la conexión y la configuración del servidor.", "error");
+    } else {
+      showToast("Credenciales inválidas", "Revisa el correo/RUC y contraseña", "error");
+    }
   });
 }
 
-function logout() {
+async function logout() {
+  await fetch("api/index.php?action=logout", { method: "POST" }).catch(() => {});
   state.loggedIn = false;
   state.isAdmin = false;
+  state.adminAccess = false;
   state.editPanelOpen = false;
   state.editClientId = null;
   state.regEmail = null;
-  sessionStorage.removeItem("nc-logged");
-  sessionStorage.removeItem("nc-admin");
-  sessionStorage.removeItem("nc-client");
   location.hash = "";
   renderApp();
 }
@@ -1234,6 +1316,11 @@ function handleRegister(e) {
     return;
   }
 
+  if (new TextEncoder().encode(password).length > 72) {
+    if (errEl) { errEl.textContent = "La contraseña no puede superar 72 bytes."; errEl.classList.add("register__error--visible"); }
+    return;
+  }
+
   if (!/[A-Z]/.test(password)) {
     if (errEl) { errEl.textContent = "La contraseña debe tener al menos una letra mayúscula."; errEl.classList.add("register__error--visible"); }
     return;
@@ -1262,6 +1349,10 @@ function handleRegister(e) {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Crear cuenta"; }
     if (data.error) {
       if (errEl) { errEl.textContent = data.error; errEl.classList.add("register__error--visible"); }
+      return;
+    }
+    if (!data.mail_sent) {
+      if (errEl) { errEl.textContent = data.message || "No se pudo enviar el código. Inténtalo de nuevo más tarde."; errEl.classList.add("register__error--visible"); }
       return;
     }
     state.regEmail = email;
@@ -1301,13 +1392,10 @@ function handleVerify(e) {
       if (errEl) { errEl.textContent = data.error; errEl.classList.add("register__error--visible"); }
       return;
     }
-    // Éxito: recargar datos y mostrar login
-    loadAppData().then(() => {
-      state.regEmail = null;
-      state.view = "login";
-      renderApp();
-      showToast("¡Bienvenido!", "Cuenta verificada. Ahora puedes iniciar sesión.", "check_circle");
-    });
+    state.regEmail = null;
+    state.view = "login";
+    renderApp();
+    showToast("¡Bienvenido!", "Cuenta verificada. Ahora puedes iniciar sesión.", "check_circle");
   })
   .catch(err => {
     if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Verificar cuenta"; }
@@ -1330,6 +1418,8 @@ function resendCode() {
     if (btn) { btn.textContent = "Reenviar"; btn.style.pointerEvents = "auto"; }
     if (data.error) {
       showToast("Error", data.error, "error");
+    } else if (!data.mail_sent) {
+      showToast("No se pudo enviar", data.message || "Revisa la configuración del correo.", "error");
     } else {
       showToast("Enviado", "Nuevo código enviado a tu correo.", "mail");
     }
@@ -1371,7 +1461,7 @@ window.addEventListener("hashchange", handleRoute);
  * 12. INICIALIZACIÓN
  * ============================================================ */
 document.addEventListener("DOMContentLoaded", async () => {
-  await loadAppData();
+  await restoreSession();
   const loader = document.querySelector(".app-loading");
   if (loader) loader.style.display = "none";
   handleRoute();

@@ -36,7 +36,9 @@ function enviarCorreo($destinatario, $nombreDestinatario, $asunto, $cuerpoHTML) 
     } catch (Exception $e) {
         // En desarrollo, registrar el error sin bloquear
         $log = date('Y-m-d H:i:s') . " | ERROR: " . $mail->ErrorInfo . "\n";
-        @file_put_contents(__DIR__ . '/mail_log.txt', $log, FILE_APPEND);
+        if (function_exists('privateDataDirectory')) {
+            @file_put_contents(privateDataDirectory() . DIRECTORY_SEPARATOR . 'mail_log.txt', $log, FILE_APPEND | LOCK_EX);
+        }
         return ['ok' => false, 'msg' => 'Error al enviar correo: ' . $mail->ErrorInfo];
     }
 }
